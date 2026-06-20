@@ -1,0 +1,17 @@
+# 이미지 빌드 컨텍스트에서 제외 (npm ci + tsc로 깨끗이 재생성)
+node_modules
+dist
+.git
+.gitignore
+.dockerignore
+.DS_Store
+*.log
+npm-debug.log*
+.mytrainer
+data
+*.db
+*.db-*
+test
+.vscode
+.idea
+*.md

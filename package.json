@@ -1,0 +1,30 @@
+{
+  "name": "trainerzip-mcp",
+  "version": "0.1.0",
+  "description": "헬스 트레이너용 표준 MCP 서버 (회원 메모리·루틴·피드백·통계). PlayMCP / Claude / ChatGPT 등 어떤 호스트에서도 동작.",
+  "type": "module",
+  "bin": {
+    "mytrainer": "dist/mytrainer.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/mytrainer.js",
+    "start:http": "node dist/http.js",
+    "seed": "node dist/seed.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.11.0",
+    "better-sqlite3": "^11.8.1",
+    "express": "^4.21.2",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.7.0",
+    "typescript": "^5.6.0"
+  }
+}
