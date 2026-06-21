@@ -16,12 +16,21 @@ const validDate = (d: string) => /^\d{4}-\d{2}-\d{2}$/.test(d) && !isNaN(Date.pa
 const DISC = "\n※ 추정치 — 컨디션·부상 변수 있음. 통증 시 중단하고 전문가와 상담.";
 const vol = (s: any) => s.weight * s.reps * (s.sets ?? 1);
 const setShape = { exercise: z.string().min(1), weight: z.number().nonnegative(), reps: z.number().int().positive(), sets: z.number().int().positive().optional(), rpe: z.number().min(1).max(10).optional() };
+const SERVICE = "나만의 근력 트레이너"; // 모든 tool description에 포함(PlayMCP 심사 요건)
+// 읽기 전용(조회·분석·예측) 툴 — annotations.readOnlyHint=true
+const READONLY_TOOLS = new Set(["list_recent", "predict_goal", "suggest_next", "get_growth", "analyze", "detect_plateau", "my_weakpoint", "list_prs", "injury_guard", "injury_risk", "check_alerts", "get_briefing"]);
 
 // stdio·HTTP 공용 서버 팩토리 (stateless HTTP는 요청마다 사용자 store로 호출)
 export function buildServer(store: Store): McpServer {
-  const server = new McpServer({ name: "mytrainer", version: "0.2.0" });
+  const server = new McpServer({ name: "mytrainer", version: "0.3.0" });
   const reg = (name: string, cfg: any, fn: (a: any) => string) => {
-    server.registerTool(name, cfg, async (a: any) => {
+    const full = {
+      title: cfg.title,
+      description: `[${SERVICE}] ${cfg.description}`,                    // 심사 요건: 설명에 서비스명 포함
+      inputSchema: cfg.inputSchema,
+      annotations: { title: cfg.title ?? name, readOnlyHint: READONLY_TOOLS.has(name), destructiveHint: false, openWorldHint: false }, // 심사 요건: annotations 정의
+    };
+    server.registerTool(name, full, async (a: any) => {
       try { return text(fn(a)); } catch (e: any) { return { content: [{ type: "text" as const, text: "오류: " + (e?.message ?? String(e)) }], isError: true }; }
     });
   };
@@ -42,16 +51,7 @@ export function buildServer(store: Store): McpServer {
   reg("list_recent", { title: "최근 기록", description: "[기록] 최근 세트 조회. 트리거:'최근','내 기록'", inputSchema: { n: z.number().int().positive().max(50).optional() } },
     (a) => { const r = store.listRecent(a.n ?? 10); return r.length ? r.map((x) => `- ${x.date} ${x.exercise} ${x.weight}×${x.reps}×${x.sets}`).join("\n") : "기록 없음."; });
 
-  reg("delete_last", { title: "마지막 기록 삭제", description: "[기록] 직전 세트 삭제(정정). 트리거:'취소','삭제','잘못'", inputSchema: {} },
-    () => store.deleteLast() ? "✅ 마지막 세트 삭제" : "삭제할 기록 없음");
-
-  reg("import_history", { title: "기록 가져오기", description: "[기록] 기존 앱 데이터 일괄 등록(각 행 date 필수). 트리거:'가져오기','import'", inputSchema: { sets: z.array(z.object({ ...setShape, date: z.string() })).min(1) } },
-    (a) => { for (const s of a.sets) if (!validDate(s.date)) throw new Error(`잘못된 date: ${s.date}`); return `✅ ${store.addSets(a.sets)}개 기록 완료. 분석·예측 준비됨.`; });
-
   // ════ ML 담당(예측) ════
-  reg("estimate_1rm", { title: "1RM 추정", description: "[ML] 1RM 추정(Epley). exercise(현재)나 weight+reps. 트리거:'1RM','내 최대'", inputSchema: { exercise: z.string().optional(), weight: z.number().positive().optional(), reps: z.number().int().positive().optional() } },
-    (a) => { if (a.weight && a.reps) return `${a.weight}kg × ${a.reps}회 → 추정 1RM ${E.e1rm(a.weight, a.reps)}kg`; if (a.exercise) { const g: any = E.growthSummary(store.listSets(), a.exercise); return g.enough ? `${a.exercise} 현재 추정 1RM ${g.currentE1rm}kg` : `${a.exercise}: 데이터 부족`; } throw new Error("exercise 또는 weight+reps 필요"); });
-
   reg("predict_goal", { title: "목표 예측", description: "[ML] 목표 1RM 도달 시점 예측(정체 시 거부). 트리거:'언제','벤치 100 언제'", inputSchema: { exercise: z.string().min(1), target1rm: z.number().positive() } },
     (a) => { const e: any = E.goalETA(store.listSets(), a.exercise, a.target1rm, KST(), store.getProfile().level ?? undefined); if (!e.ok) return `${a.exercise}→${a.target1rm}kg: ${e.msg}`; if (e.alreadyReached) return `🎉 이미 ${e.currentE1rm}kg로 달성!`; return `[예측·2층모델] ${a.exercise} ${e.currentE1rm}kg → ${a.target1rm}kg\n중심 추정 약 ${e.weeks}주 뒤(${e.reachDate}) · 범위 ${e.rangeWeeks[0]}~${e.rangeWeeks[1]}주\n주간 +${e.weeklyGainKg}kg (${e.model})${e.caveat}${DISC}`; });
 
@@ -111,13 +111,7 @@ export function buildServer(store: Store): McpServer {
         `${wk >= 3 ? "이번주 꾸준하네요. 그대로 갑시다! 🔥" : "한 세트라도 더 — 습관이 이깁니다."}`;
     });
 
-  reg("motivate", { title: "동기부여", description: "[동기부여] 최근 진척 기반 한마디. 트리거:'동기부여','힘들어','지친다'", inputSchema: {} },
-    () => { const sets = store.listSets(); if (!sets.length) return "시작이 반입니다. 오늘 한 세트만 기록해봐요. 💪"; const t = KST(); const wk = new Set(sets.filter((s) => dd(s.date, t) >= 0 && dd(s.date, t) < 7).map((s) => s.date)).size; return wk >= 3 ? "이번주 벌써 잘하고 있어요. 몸은 정직합니다 — 계속 가요! 🔥" : "완벽보다 꾸준함. 가벼워도 오늘 한 번 움직이면 추세가 바뀝니다. 💪"; });
-
   // ════ 프로필·목표·상태 ════
-  reg("get_my_status", { title: "내 상태", description: "[상태] 이번주·총기록·활성부상·목표 한 줄 요약. 트리거:'상태','시작'", inputSchema: {} },
-    () => { const sets = store.listSets(); const t = KST(); const wk = new Set(sets.filter((s) => dd(s.date, t) >= 0 && dd(s.date, t) < 7).map((s) => s.date)).size; const open = store.currentSessionId(); return `[상태 · ${t}]\n- 진행 세션: ${open ? `#${open} (열림)` : "없음"}\n- 이번주 ${wk}일 · 총 ${sets.length}세트\n- 활성 부상: ${store.listInjuries(true).map((i) => i.bodypart).join(", ") || "없음"}\n- 목표: ${store.listGoals().length}개`; });
-
   reg("set_profile", { title: "프로필", description: "[상태] 단위·경력·체중·기본 반복범위. 트리거:'프로필','내 정보'", inputSchema: { units: z.enum(["kg", "lb"]).optional(), level: z.enum(["초급", "중급", "고급"]).optional(), bodyweight: z.number().positive().optional(), repLow: z.number().int().positive().optional(), repHigh: z.number().int().positive().optional() } },
     (a) => { const p = store.setProfile({ units: a.units, level: a.level, bodyweight: a.bodyweight, rep_low: a.repLow, rep_high: a.repHigh }); return `✅ ${p.units} · ${p.level ?? "-"} · 체중 ${p.bodyweight ?? "-"} · 기본 ${p.rep_low}~${p.rep_high}회`; });
 
