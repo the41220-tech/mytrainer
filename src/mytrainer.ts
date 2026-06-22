@@ -28,7 +28,7 @@ export function buildServer(store: Store): McpServer {
       title: cfg.title,
       description: `[${SERVICE}] ${cfg.description}`,                    // 심사 요건: 설명에 서비스명 포함
       inputSchema: cfg.inputSchema,
-      annotations: { title: cfg.title ?? name, readOnlyHint: READONLY_TOOLS.has(name), destructiveHint: false, openWorldHint: false }, // 심사 요건: annotations 정의
+      annotations: { title: cfg.title ?? name, readOnlyHint: READONLY_TOOLS.has(name), destructiveHint: false, idempotentHint: READONLY_TOOLS.has(name), openWorldHint: false }, // 심사 요건: 힌트 4종 모두 정의
     };
     server.registerTool(name, full, async (a: any) => {
       try { return text(fn(a)); } catch (e: any) { return { content: [{ type: "text" as const, text: "오류: " + (e?.message ?? String(e)) }], isError: true }; }
