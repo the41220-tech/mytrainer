@@ -1,80 +1,162 @@
-# 트레이너ZIP MCP 서버
+# mytrainer MCP — personal strength records, calculations, and briefings
 
-헬스 트레이너용 **표준 MCP 서버**. 회원 이력(영속 메모리)·루틴 초안·피드백 초안·진척 통계를 제공한다.
-호스트 독립이라 **Claude · ChatGPT · Cursor 등 어떤 MCP 호스트**에서도 동작하며, 카카오 **PlayMCP**에 등록하면 카카오톡에서도 쓸 수 있다.
+mytrainer addresses a concrete workflow: turn exercise sets recorded in conversation into persistent records, calculated training volume, next-set suggestions, and a progress briefing. The MCP host handles conversation and tool selection; this server stores records in SQLite and computes results in TypeScript rather than asking a language model to invent numbers. This is an implemented workflow, not evidence of customer adoption or improved fitness outcomes.
 
-- 스택: TypeScript + `@modelcontextprotocol/sdk`(v1.x) + better-sqlite3 + zod
-- 전송: stdio (로컬). 카카오 클라우드 원격 배포용 Streamable HTTP는 다음 단계.
-- 설계 근거: `../트레이너ZIP_MCP_스펙.md`
+The repository also retains the earlier **TrainerZIP (트레이너ZIP)** trainer/member prototype. Its consent, member-disambiguation, routine, and feedback tools are not part of the current application. See the synthetic legacy walkthrough below before interpreting older documentation.
 
-## 빌드 & 실행
+## Current scope and host support
+
+The stack is TypeScript, `@modelcontextprotocol/sdk` v1, Express, better-sqlite3, and Zod. [package.json](package.json) starts `dist/mytrainer.js`; [tsconfig.json](tsconfig.json) excludes the legacy `index.ts`, `db.ts`, and `domain.ts` from the normal build.
+
+| Interface or host | Implemented / intended | Verified on 2026-10-02 |
+|---|---|---|
+| Local stdio | `src/mytrainer.ts`, launched by `npm start` | SDK client initialization, tool listing, and synthetic calls |
+| Streamable HTTP | `src/http.ts`: stateless `POST /mcp`, `GET /health`; GET/DELETE `/mcp` return 405 | Loopback SDK handshake, tool calls, health, missing-key rejection, and two-key record separation |
+| Claude Desktop | Intended local stdio configuration below | Not tested inside the desktop host |
+| ChatGPT / Cursor | Potential clients if their transport/configuration supports this server | Not tested; no “any host” compatibility claim |
+| Kakao PlayMCP / Kakao Cloud | HTTP implementation exists; deployment/registration instructions in [DEPLOY.md](DEPLOY.md) | No remote endpoint, registration, approval, or Kakao chat verified |
+| Kakao / Google OAuth | Not implemented in the current HTTP source | Not tested |
+
+The active server exposes **20 tools**, confirmed by `tools/list`. DEPLOY.md's 22-tool count and parts of [the secondary strength README](README_근력AI.md) are historical documentation, not the current catalog. Deployment deadlines and provider requirements recorded in DEPLOY.md are dated guidance, not freshly checked service policy.
+
+## Implemented workflow and technical choices
+
+1. `start_session` opens a session; another start reuses the open session instead of creating a duplicate.
+2. `log_set` stores exercise, weight, repetitions, optional set count and RPE, with an explicit date or the server's KST date. An open session is linked automatically. `log_cardio` stores cardio separately.
+3. `end_session` reports duration, recorded set rows, exercises, and volume. In a synthetic local call, one row containing bench press at 80 kg, 5 repetitions, and 5 sets produced volume **2,000**. This checks arithmetic, not training effectiveness.
+4. `analyze`, `list_prs`, and `get_growth` calculate summaries from stored records. `predict_goal` combines a recent e1RM trend with a training-level prior; insufficient data and sufficiently established nonpositive trends can refuse an ETA.
+5. `log_injury` and `injury_guard` expose a rule-based avoid list for recognized body-part names. The host should consult it before discussing a routine. The active server does not generate a complete routine or automatically block unsafe `log_set` calls. Review suggestions before acting on them.
+
+The separation is visible in [engine.ts](src/engine.ts) (pure calculations), [store.ts](src/store.ts) (SQLite and a Store interface), [mytrainer.ts](src/mytrainer.ts) (tool definitions and shared `buildServer(store)`), and [http.ts](src/http.ts) (HTTP transport).
+
+These choices have costs:
+
+- MCP reuses a host's conversational interface but leaves parsing, consent collection, and tool sequencing dependent on that host. The current personal server has no member-registration consent gate.
+- SQLite provides local persistence without a live database service, but the native driver must match the runtime, WAL files need an appropriate local filesystem, and deployment needs persistent storage and backups.
+- Stateless HTTP constructs a server per request and maps a supplied key to a database file. This avoids a session registry but adds per-request work. A bounded LRU connection cache closes evicted databases.
+- A header key is a **partition selector**, not a verified account identity: any nonempty value passes the required-key check. There is no key registry, OAuth, revocation, or demonstrated production authorization. Hashing filenames does not encrypt health records. Do not expose this server with real personal data based on this mechanism alone.
+- Formula-based e1RM, heuristic growth priors/decay, keyword body-part classification, and ACWR flags are inspectable and repeatable, but they are not clinically validated assessments or calibrated probabilities. ETA ranges are heuristic ranges, not measured confidence intervals.
+
+## Evidenced failure and change
+
+[The pipeline audit](PIPELINE_MODULE_AUDIT.md) documents a verification failure: the old smoke test targeted `index.js`, not the application being deployed. Current build configuration excludes that legacy module, the start script targets `mytrainer.js`, and the obsolete npm smoke script is absent. The old test file remains, so invoking it after only a normal build does **not** verify the active server.
+
+[The prediction design note](모델설계_2층예측.md) records overly optimistic straight-line ETA output in v1 and a v2 change to recent trends, smaller priors, shrinkage, caps, decay, and range output. Those mechanisms are present in `engine.ts`; the note's historical examples are not an independent forecast-accuracy evaluation. No owner contribution or customer-feedback provenance is inferred from that note.
+
+[The earlier known-issues review](KNOWN_ISSUES_AND_PREVENTION.md) explains why passing a local smoke can hide cwd, native ABI, timezone, malformed-date, and duplicate-feedback problems. It concerns the legacy prototype; it should not be read as proof that every issue is fixed in either implementation.
+
+## Synthetic trainer workflow — legacy scope only
+
+This illustrates the guards in `src/index.ts` / `src/domain.ts`, not tools available through `npm start` or HTTP. All names and injury entries in this walkthrough and its executed smoke test are synthetic.
+
+1. Attempt `register_member` for synthetic “김민지” with `consent=false`: registration is held. `consent=true` is an explicit caller assertion, not proof of legally valid consent.
+2. Register two synthetic members with that name, one with a knee-injury flag. Calling `generate_routine` by `memberName` returns two candidates and requires `memberId`; it does not silently select a person.
+3. Select the knee-flagged member by ID and request lower-body focus. The rule-based draft omits barbell squats from its main section, lists them among exclusions, and asks the trainer to review and adjust. An avoid list is not a guarantee that remaining exercises are safe.
+4. Record synthetic leg press and leg curl sets. `progress_stats` reports **4,280** volume from the fixture, not an estimated outcome.
+5. `draft_feedback` returns copy/paste text and creates a pending-feedback entry. The smoke verified its appearance in the briefing. A trainer should review it, send it outside the server, then call `mark_feedback_sent`; actual delivery and that final marking step were not tested in this run. There is no automatic Kakao message sending. Repeated drafting can create multiple pending rows, as the known-issues review notes.
+
+## Setup and local verification
+
+Use a compatible Node runtime consistently for install, build, and the host process. `package.json` declares Node >=18, but that is not a tested runtime matrix. **Node 22.23.3 on macOS arm64 worked in this review; Node 26.8.2 failed to compile better-sqlite3 11.10.0 with V8 API errors.** The driver failure is not fixed by this README.
 
 ```bash
-npm install
-npm run build      # tsc → dist/
-npm start          # node dist/index.js (stdio)
+npm ci --include=dev
+npm run build
+# Create a disposable directory for synthetic records, never a real member DB.
+mkdir -p /tmp/mytrainer-synthetic
+MYTRAINER_DB_PATH=/tmp/mytrainer-synthetic/local.db npm start
 ```
 
-> ℹ️ 이 저장소는 의존성 미설치 상태로 제공됩니다. `npm install`을 먼저 실행하세요.
-> (작성 환경(샌드박스)에서는 npm 레지스트리가 차단되어 있어, 순수 도메인 로직만 실행 검증했고 풀 빌드/스모크는 로컬에서 돌려야 합니다.)
-
-## 스모크 테스트
-
-빌드 후 stdio로 서버를 띄워 MCP 핸드셰이크 + 주요 툴 호출을 자동 검증한다.
+The stdio process speaks MCP, not an interactive terminal prompt; connect a client and keep stdout reserved for JSON-RPC. For HTTP, in a separate terminal after building:
 
 ```bash
-npm run build && npm run smoke
+MYTRAINER_DB_PATH=/tmp/mytrainer-synthetic/http.db \
+MYTRAINER_DB_DIR=/tmp/mytrainer-synthetic/users \
+MYTRAINER_REQUIRE_KEY=true PORT=3000 npm run start:http
+curl http://127.0.0.1:3000/health
 ```
 
-검증 항목: 14개 툴 노출 · 동의 없는 등록 거부(G4) · 동명이인 모호 처리(G1) · 부상 운동 자동 제외 · 볼륨 통계 실계산(4,280) · 미발송 피드백 브리핑(G3).
+HTTP currently listens without an explicit loopback binding. Keep this synthetic test behind local firewall controls; do not treat it as a secured public deployment. Use an MCP client such as Inspector with `http://127.0.0.1:3000/mcp` and a synthetic `x-api-key` header. Check initialization, `tools/list` (20), then `tools/call`; a health response alone is not an MCP acceptance test. Inspector is an optional separately installed client, not a repository dependency.
 
-## 호스트에 연결 (예: Claude Desktop)
-
-`claude_desktop_config.json`에 추가:
+For Claude Desktop, the following is a configuration example, not an executed host result. Replace placeholders with absolute paths and create the database's parent directory first. Use the same Node binary that installed the native driver.
 
 ```json
 {
   "mcpServers": {
-    "trainerzip": {
-      "command": "node",
-      "args": ["/절대경로/trainerzip-mcp/dist/index.js"],
-      "env": { "TRAINERZIP_DB_PATH": "/절대경로/trainerzip.db" }
+    "mytrainer": {
+      "command": "/absolute/path/to/node",
+      "args": ["/absolute/path/to/mytrainer/dist/mytrainer.js"],
+      "env": { "MYTRAINER_DB_PATH": "/absolute/path/to/synthetic/local.db" }
     }
   }
 }
 ```
 
-## 환경변수
+### Verification record — 2026-10-02
 
-- `TRAINERZIP_DB_PATH` — SQLite 파일 경로(기본: 실행 디렉터리의 `trainerzip.db`).
+At source revision `08052afdec0cec2dea25300dd04a7aa9012c0918`, checks ran in an isolated copy outside the repository, using only synthetic databases. No live APIs, real member records, deployment, or remote writes were used. The seed source/data was deliberately not included or executed.
 
-## Tool 목록 (14)
-
-| Tool | 설명 |
+| Execution | Observed result and boundary |
 |---|---|
-| `get_my_status` | (최우선) 플랜·쿼터·회원 수·미발송 피드백·동의 현황 |
-| `get_my_briefing` | 오늘 세션·미발송 피드백·재등록 임박 요약 |
-| `register_member` | 회원 등록 (동의 필수 · G4) |
-| `update_member` | 회원 정보 수정 |
-| `list_members` / `get_member` | 목록 / 상세 |
-| `resolve_member` | 이름·별칭으로 후보 식별 (동명이인 · G1) |
-| `log_session` | 운동 세션 기록 |
-| `generate_routine` | 목표·부상 반영 루틴 초안(금기 운동 제외) |
-| `draft_feedback` | 복붙용 피드백 초안 + 미발송 큐 적재(G3) |
-| `mark_feedback_sent` | 전송 완료 처리 |
-| `progress_stats` | 볼륨·부위·추세 실계산(추정 아님) |
-| `schedule_session` | 세션 일정 저장 |
-| `set_my_style` | 트레이너 말투 샘플 저장 |
+| `npm ci --include=dev --ignore-scripts --no-audit --no-fund` | Installed 171 packages from the lockfile; native driver rebuilt separately under Node 22.23.3 |
+| `npm run build` in the safe copy | Passed for copied sources; **not a full-repository build**, because `src/seed.ts` was omitted to avoid personal seed data |
+| Temporary SDK-client smoke against active stdio and loopback HTTP | **14 synthetic checks passed**: 20-tool listing on both transports, legacy tools absent, insufficient-data refusal, negative-weight rejection, duplicate-session reuse, volume 2,000, knee avoid list, SQLite health, HTTP 401/405, two-key record separation, and flat-trend ETA refusal |
+| Explicit compilation of legacy sources, then `node test/smoke.mjs` | Printed **ALL PASS**: initialization, 14 legacy tools, consent refusal, two-member ambiguity, routine exclusions, volume 4,280, feedback draft/pending briefing, and member count |
+| Node 26 native rebuild | Failed; no successful Node 26 support claim |
 
-## 설계 가드 (스펙 §12 대응)
+The active smoke harness was review-only, outside the repository; there is no checked-in equivalent active test script, and **`npm run smoke` does not exist**. To reproduce the legacy test in a disposable checkout, install dependencies with a compatible Node, then explicitly compile its excluded sources:
 
-- **G1 회원 식별**: 동명이인/미등록은 `resolve_member`로 되묻고 `memberId` 요구.
-- **G2 상태/쿼터**: `get_my_status` 최우선 호출.
-- **G4 동의**: `register_member`는 `consent=true` 아니면 등록 거부.
-- **G6 안전**: 부상 부위별 금기 운동을 루틴에서 자동 제외 + 면책 문구.
+```bash
+./node_modules/.bin/tsc src/index.ts src/db.ts src/domain.ts \
+  --target ES2022 --module Node16 --moduleResolution Node16 \
+  --strict --esModuleInterop --skipLibCheck --outDir dist
+node test/smoke.mjs
+```
 
-## 다음 단계
+That script creates and deletes `smoke-test.db` in its cwd: use a disposable checkout with no existing file of that name. It is a legacy check, not active-server coverage. Full seed-inclusive build, desktop-host integration, cloud persistence/restarts, concurrent tenant stress, timezone boundary behavior, forecast accuracy, and clinical safety remain unverified here.
 
-1. **Streamable HTTP 전송** 추가 → 카카오 클라우드 Endpoint 배포(공모전 필수).
-2. **다중 제공자 OAuth**(카카오·구글) 연동 → 원격 다중 테넌트.
-3. **Pro**: 식단 사진 분석(Vision), 외부 캘린더 동기화.
+## Configuration reference
+
+| Variable | Current behavior |
+|---|---|
+| `MYTRAINER_DB_PATH` | Unkeyed SQLite file; default `~/.mytrainer/mytrainer.db`. Explicit paths need an existing parent directory. |
+| `MYTRAINER_DB_DIR` | Base directory, default `~/.mytrainer`; keyed files go under `users/`, named with the first 16 hex characters of a SHA-256 key hash. |
+| `MYTRAINER_REQUIRE_KEY` | HTTP requires a nonempty key only when exactly `true`; default `false` shares the unkeyed database for requests without a key. |
+| `MYTRAINER_KEY_HEADER` | HTTP partition-key header name, default `x-api-key`. |
+| `MYTRAINER_MAX_CACHE` | Maximum cached SQLite connections, default 200. |
+| `PORT` | HTTP port, default 3000. |
+| `TRAINERZIP_DB_PATH` | Legacy trainer server only; not the active personal server. |
+
+## Tool catalog
+
+### Active personal server — 20 tools
+
+| Responsibility | Tools | Behavior |
+|---|---|---|
+| Recording | `start_session`, `end_session`, `log_set`, `log_cardio`, `list_recent` | Persist sessions/records and return summaries |
+| Prediction | `predict_goal`, `suggest_next` | Heuristic ETA and next-set suggestions |
+| Analysis | `get_growth`, `analyze`, `detect_plateau`, `my_weakpoint`, `list_prs` | Calculate trends, volume, balance, and records |
+| Injury flags | `log_injury`, `update_injury`, `injury_guard`, `injury_risk`, `check_alerts` | Persist flags and return rule-based warnings; not diagnosis |
+| Briefing | `get_briefing` | Summarize recent records and goals |
+| Profile / goals | `set_profile`, `set_goal` | Store settings and targets |
+
+`delete_last`, `import_history`, `estimate_1rm`, `motivate`, and `get_my_status` are not registered by the active server despite appearing in older material. Profile units are stored, but calculation/output paths still use kg wording; lb conversion is not established.
+
+### Retained TrainerZIP prototype — 14 tools, excluded from normal build
+
+`get_my_status`, `get_my_briefing`, `register_member`, `update_member`, `list_members`, `get_member`, `resolve_member`, `log_session`, `generate_routine`, `draft_feedback`, `mark_feedback_sent`, `progress_stats`, `schedule_session`, `set_my_style`.
+
+## Proposed next evaluation
+
+First add an active-server synthetic regression harness to the repository and run a clean, seed-inclusive build with explicitly synthetic seed data. Proposed acceptance checks: exact active tool catalog, both transports completing initialize/list/call, invalid-input error responses, no cross-key record access, and persistence after a restart using an explicit disposable volume. Record Node/OS versions and failures, not just a green health endpoint.
+
+Before claiming remote Kakao support, separately verify a deployed HTTPS endpoint, the actual host's tool calls, durable storage across redeploys, and an owner-approved identity/authorization design. OAuth remains future work. Before presenting predictions as useful forecasts, compare held-out synthetic/noisy trajectories against simple baselines and report error and refusal rates; synthetic success would still not establish clinical safety or real-user benefit.
+
+## Supporting documentation and attribution
+
+The original TrainerZIP name and legacy implementation are retained rather than represented as current features. Technical protocol implementation uses the [Model Context Protocol SDK](https://github.com/modelcontextprotocol/typescript-sdk); persistence uses [better-sqlite3](https://github.com/WiseLibs/better-sqlite3). DEPLOY.md attributes its provider guidance to Kakao's technical article and competition guides; those are historical references, not a claimed deployment result. No individual/team contribution biography is established here.
+
+- [Deployment guide and historical provider references](DEPLOY.md)
+- [Pipeline/module audit](PIPELINE_MODULE_AUDIT.md)
+- [Prediction model design and heuristic limits](모델설계_2층예측.md)
+- [Legacy known issues and prevention checklist](KNOWN_ISSUES_AND_PREVENTION.md)
